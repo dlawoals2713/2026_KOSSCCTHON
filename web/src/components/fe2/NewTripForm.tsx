@@ -1,6 +1,7 @@
 'use client'
 
-import { Controller, useForm } from 'react-hook-form'
+import { useState } from 'react'
+import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { useMutation } from '@tanstack/react-query'
 import { useRouter } from 'next/navigation'
@@ -10,8 +11,9 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { createTrip } from '@/lib/api/trips'
+import { lookupUserByEmail } from '@/lib/api/users'
+import type { User } from '@/lib/types'
 import { useUser } from '@/lib/user-context'
-import { cn } from '@/lib/utils'
 
 const schema = z
   .object({
@@ -73,14 +75,17 @@ function FieldError({
 export default function NewTripForm() {
   const router = useRouter()
 
-  const {
-    currentUser,
-    users,
-  } = useUser()
+  const { currentUser } = useUser()
+
+  // 초대한 멤버(방장 제외). 전체 가입자 목록 대신 이메일로 한 명씩 찾아 추가한다.
+  const [invited, setInvited] = useState<User[]>([])
+  const [inviteEmail, setInviteEmail] = useState('')
+  const [inviteError, setInviteError] = useState('')
+  const [inviting, setInviting] = useState(false)
 
   const {
     register,
-    control,
+    setValue,
     handleSubmit,
     formState: { errors },
   } = useForm<FormValues>({
@@ -92,10 +97,7 @@ export default function NewTripForm() {
       startDate: '',
       endDate: '',
 
-      // 실제 Backend에서 받아온 사용자들을 기본 선택
-      memberIds: users.map(
-        (user) => user.userId,
-      ),
+      memberIds: [currentUser.userId],
     },
   })
 
@@ -115,6 +117,35 @@ export default function NewTripForm() {
       )
     },
   })
+
+  const syncMembers = (list: User[]) => {
+    setInvited(list)
+    setValue(
+      'memberIds',
+      [currentUser.userId, ...list.map((u) => u.userId)],
+      { shouldValidate: true },
+    )
+  }
+
+  const addByEmail = async () => {
+    setInviteError('')
+    const email = inviteEmail.trim()
+    if (!email) return
+    setInviting(true)
+    try {
+      const user = await lookupUserByEmail(email)
+      if (user.userId === currentUser.userId || invited.some((u) => u.userId === user.userId)) {
+        setInviteError('이미 추가된 멤버예요.')
+      } else {
+        syncMembers([...invited, user])
+        setInviteEmail('')
+      }
+    } catch (e) {
+      setInviteError(e instanceof Error ? e.message : '사용자를 찾지 못했어요.')
+    } finally {
+      setInviting(false)
+    }
+  }
 
   return (
     <form
@@ -206,71 +237,48 @@ export default function NewTripForm() {
           멤버 (2~4명)
         </p>
 
-        <Controller
-          control={control}
-          name="memberIds"
-          render={({ field }) => (
-            <div className="mt-2 flex flex-wrap gap-2">
-              {users.map((user) => {
-                const checked =
-                  field.value.includes(
-                    user.userId,
-                  )
+        <div className="mt-2 flex flex-wrap gap-2">
+          <span className="rounded-full border border-blue-600 bg-blue-600 px-4 py-1.5 text-sm text-white">
+            {currentUser.name}
+            <span className="ml-1 text-xs opacity-80">(방장)</span>
+          </span>
 
-                const isOwner =
-                  user.userId ===
-                  currentUser.userId
+          {invited.map((user) => (
+            <span
+              key={user.userId}
+              className="inline-flex items-center gap-1 rounded-full border border-slate-300 bg-white px-4 py-1.5 text-sm text-slate-700"
+            >
+              {user.name}
+              <button
+                type="button"
+                aria-label={`${user.name} 제외`}
+                className="text-slate-400 hover:text-slate-700"
+                onClick={() => syncMembers(invited.filter((u) => u.userId !== user.userId))}
+              >
+                ×
+              </button>
+            </span>
+          ))}
+        </div>
 
-                return (
-                  <button
-                    key={user.userId}
-                    type="button"
-                    aria-pressed={checked}
-
-                    onClick={() => {
-                      // 방장은 여행 멤버에서 제외할 수 없게 처리
-                      if (isOwner) {
-                        return
-                      }
-
-                      field.onChange(
-                        checked
-                          ? field.value.filter(
-                            (id) =>
-                              id !==
-                              user.userId,
-                          )
-                          : [
-                            ...field.value,
-                            user.userId,
-                          ],
-                      )
-                    }}
-
-                    className={cn(
-                      'rounded-full border px-4 py-1.5 text-sm transition-colors',
-
-                      checked
-                        ? 'border-blue-600 bg-blue-600 text-white'
-                        : 'border-slate-300 bg-white text-slate-700 hover:bg-slate-50',
-
-                      isOwner &&
-                      'cursor-default',
-                    )}
-                  >
-                    {user.name}
-
-                    {isOwner && (
-                      <span className="ml-1 text-xs opacity-80">
-                        (방장)
-                      </span>
-                    )}
-                  </button>
-                )
-              })}
-            </div>
-          )}
-        />
+        <div className="mt-3 flex gap-2">
+          <Input
+            type="email"
+            value={inviteEmail}
+            placeholder="초대할 친구의 가입 이메일"
+            onChange={(e) => setInviteEmail(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault()
+                void addByEmail()
+              }
+            }}
+          />
+          <Button type="button" variant="outline" disabled={inviting || !inviteEmail.trim()} onClick={() => void addByEmail()}>
+            {inviting ? '찾는 중…' : '추가'}
+          </Button>
+        </div>
+        <FieldError message={inviteError} />
 
         <FieldError
           message={

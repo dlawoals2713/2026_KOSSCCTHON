@@ -11,6 +11,7 @@ from sqlalchemy import create_engine, event, text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from backend.auth import current_user
 from backend.main import app, get_db, hash_password
 
 
@@ -52,6 +53,7 @@ class BackendFixture(unittest.TestCase):
                 yield session
 
         app.dependency_overrides[get_db] = override_db
+        app.dependency_overrides[current_user] = lambda: "owner"  # 기존 계약 테스트는 방장으로 로그인한 것으로 간주
         self.body = {"trip_name": "성수 여행", "region": "성수", "start_date": "2026-09-20", "end_date": "2026-09-20",
                      "owner_user_id": "owner", "day_start_time": "13:00:00", "day_end_time": "20:00:00", "description": ""}
 

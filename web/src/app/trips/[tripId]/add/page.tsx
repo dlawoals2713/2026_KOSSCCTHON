@@ -89,7 +89,7 @@ export default function AddContentPage() {
       <div>
         <h1 className="text-lg font-semibold text-foreground">숏폼 링크 저장</h1>
         <p className="text-sm text-muted-foreground">
-          릴스·쇼츠·틱톡 링크를 붙여넣으면 AI가 장소를 분석해요.
+          YouTube(쇼츠·일반 영상)·Instagram·TikTok 등 링크를 붙여넣으면 AI가 장소를 분석해요.
         </p>
       </div>
 
@@ -110,7 +110,7 @@ export default function AddContentPage() {
             <Label htmlFor="url">숏폼 링크</Label>
             {platform && <Badge variant="secondary">{PLATFORM_LABEL[platform]}</Badge>}
           </div>
-          <Input id="url" placeholder="https://www.instagram.com/reel/..." {...register('url')} />
+          <Input id="url" placeholder="https://youtube.com/shorts/... 또는 instagram.com/reel/..." {...register('url')} />
           {errors.url && <p className="text-sm text-destructive">{errors.url.message}</p>}
         </div>
 
@@ -118,7 +118,7 @@ export default function AddContentPage() {
           <Label htmlFor="note">보정 입력 (선택)</Label>
           <Textarea
             id="note"
-            placeholder="게시글 내용이나 해시태그를 붙여넣으면 분석 정확도가 올라가요. 예: 성수 감성 카페 #디저트 #데이트"
+            placeholder="게시글 내용이나 해시태그를 붙여넣으면 분석 정확도가 올라가요. (Instagram 등 자동으로 못 읽는 링크는 꼭 붙여넣어 주세요) 예: 성수 감성 카페 #디저트 #데이트"
             rows={4}
             {...register('note')}
           />

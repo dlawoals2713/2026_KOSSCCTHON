@@ -15,6 +15,10 @@ from ai.preference_analyzer.metadata_fetcher import (
     extract_youtube_video_id,
 )
 from ai.preference_analyzer.schemas import AnalyzedContent
+from ai.preference_analyzer.source_fetcher import (
+    analyze_source,
+    normalize_source_url,
+)
 
 from backend.services.common import (
     ServiceError,
@@ -254,6 +258,7 @@ def save_shortform(
     trip_id: str,
     user_id: str,
     url: str,
+    note: str = "",
 ) -> dict:
     """
     Shorts 분석 → 단일 장소 Kakao 검증 →
@@ -265,22 +270,13 @@ def save_shortform(
     # ---------------------------------------------------------
 
     try:
-        video_id = (
-            extract_youtube_video_id(
-                url
-            )
-        )
+        platform, canonical = normalize_source_url(url)
 
-    except MetadataError:
+    except MetadataError as exc:
         raise ServiceError(
             400,
-            "올바른 YouTube URL을 입력해주세요.",
+            str(exc),
         ) from None
-
-    canonical = (
-        "https://www.youtube.com/watch"
-        f"?v={video_id}"
-    )
 
     # ---------------------------------------------------------
     # 2. 여행 멤버 및 중복 검사
@@ -307,10 +303,18 @@ def save_shortform(
     # ---------------------------------------------------------
 
     try:
-        result = analyze_youtube_url(
-            ai_user_id(user_id),
-            canonical,
-        )
+        if platform == "youtube" and not note.strip():
+            result = analyze_youtube_url(
+                ai_user_id(user_id),
+                canonical,
+            )
+        else:
+            result = analyze_source(
+                ai_user_id(user_id),
+                platform,
+                canonical,
+                note,
+            )
 
         analysis = (
             AnalyzedContent.model_validate(
@@ -355,6 +359,12 @@ def save_shortform(
                 raise ValueError(
                     "Analysis field too long"
                 )
+
+    except MetadataError as exc:
+        raise ServiceError(
+            422,
+            str(exc),
+        ) from None
 
     except Exception:
         raise ServiceError(
@@ -586,6 +596,7 @@ def save_shortform(
             trip_id=trip_id,
             user_id=user_id,
             url=canonical,
+            platform=platform,
             title=title,
             place_id=place_id,
             keywords=json.dumps(
@@ -600,6 +611,7 @@ def save_shortform(
                     content_id,
                     trip_id,
                     user_id,
+                    platform,
                     url,
                     title,
                     category,
@@ -614,6 +626,7 @@ def save_shortform(
                     :content_id,
                     :trip_id,
                     :user_id,
+                    :platform,
                     :url,
                     :title,
                     :category,
@@ -670,6 +683,9 @@ def save_shortform(
 
             "place_verified":
                 place_id is not None,
+
+            "platform":
+                platform,
         },
 
         "preference_profile":

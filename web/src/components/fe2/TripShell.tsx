@@ -2,9 +2,10 @@
 
 import type { ReactNode } from 'react'
 import Link from 'next/link'
-import { usePathname } from 'next/navigation'
-import { useQuery } from '@tanstack/react-query'
-import { getTrip } from '@/lib/api/trips'
+import { usePathname, useRouter } from 'next/navigation'
+import { useMutation, useQuery } from '@tanstack/react-query'
+import { deleteTrip, getTrip, leaveTrip } from '@/lib/api/trips'
+import { useUser } from '@/lib/user-context'
 import { cn } from '@/lib/utils'
 import { formatDateRange } from './format'
 import MemberAvatar from './MemberAvatar'
@@ -19,6 +20,8 @@ const TABS = [
 
 export default function TripShell({ tripId, children }: { tripId: string; children: ReactNode }) {
   const pathname = usePathname()
+  const router = useRouter()
+  const { currentUser } = useUser()
   const {
     data: trip,
     isPending,
@@ -26,6 +29,23 @@ export default function TripShell({ tripId, children }: { tripId: string; childr
     error,
     refetch,
   } = useQuery({ queryKey: ['trip', tripId], queryFn: () => getTrip(tripId) })
+
+  const isOwner = !!trip && trip.ownerUserId === currentUser.userId
+
+  // 방장: 여행 취소(삭제) / 멤버: 여행 나가기
+  const leaveMutation = useMutation({
+    mutationFn: () => (isOwner ? deleteTrip(tripId) : leaveTrip(tripId, currentUser.userId)),
+    onSuccess: () => {
+      router.replace('/')
+    },
+  })
+
+  const onLeave = () => {
+    const message = isOwner
+      ? '이 여행을 취소할까요?\n담은 장소와 일정이 모두 삭제되고 되돌릴 수 없어요.'
+      : '이 여행에서 나갈까요?'
+    if (window.confirm(message)) leaveMutation.mutate()
+  }
 
   return (
     <div className="mx-auto w-full max-w-2xl px-4 py-6">
@@ -59,7 +79,20 @@ export default function TripShell({ tripId, children }: { tripId: string; childr
                 <MemberAvatar key={m.userId} name={m.name} size="sm" />
               ))}
               <span className="ml-1 text-xs text-slate-500">{trip.members.length}명</span>
+              <button
+                type="button"
+                onClick={onLeave}
+                disabled={leaveMutation.isPending}
+                className="ml-auto text-xs text-red-600 underline-offset-2 hover:underline disabled:opacity-50"
+              >
+                {leaveMutation.isPending ? '처리 중…' : isOwner ? '여행 취소' : '여행 나가기'}
+              </button>
             </div>
+            {leaveMutation.isError && (
+              <p role="alert" className="mt-1 text-xs text-red-600">
+                {leaveMutation.error instanceof Error ? leaveMutation.error.message : '처리에 실패했어요.'}
+              </p>
+            )}
           </header>
 
           <nav aria-label="여행방 메뉴" className="mt-4 grid grid-cols-4 border-b border-slate-200">

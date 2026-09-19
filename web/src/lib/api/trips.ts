@@ -1,5 +1,5 @@
 import type { Trip } from '@/lib/types'
-import { http, USE_MOCK } from './http'
+import { HttpError, http, USE_MOCK } from './http'
 import * as mocks from '@/lib/mocks'
 
 interface CreateTripResponse {
@@ -128,6 +128,7 @@ export async function getTrip(
 
   return {
     tripId: trip.trip_id,
+    ownerUserId: trip.owner_user_id,
     name: trip.trip_name,
     destination: trip.region,
     startDate: trip.start_date,
@@ -139,4 +140,19 @@ export async function getTrip(
       }),
     ),
   }
+}
+
+// 여행 취소(삭제): 방장만 가능. 담은 장소/일정도 함께 삭제된다.
+export async function deleteTrip(tripId: string): Promise<void> {
+  if (USE_MOCK) throw new HttpError(0, '목(mock) 모드에서는 지원하지 않는 기능이에요.')
+  await http(`/api/trips/${encodeURIComponent(tripId)}`, { method: 'DELETE' })
+}
+
+// 여행 나가기: 방장이 아닌 멤버 본인만 가능.
+export async function leaveTrip(tripId: string, userId: string): Promise<void> {
+  if (USE_MOCK) throw new HttpError(0, '목(mock) 모드에서는 지원하지 않는 기능이에요.')
+  await http(
+    `/api/trips/${encodeURIComponent(tripId)}/members/${encodeURIComponent(userId)}`,
+    { method: 'DELETE' },
+  )
 }

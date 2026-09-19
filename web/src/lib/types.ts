@@ -1,10 +1,11 @@
 export type Category = 'cafe' | 'food' | 'exhibition' | 'shopping' | 'sightseeing' | 'activity';
 export type TimeSlot = 'morning' | 'afternoon' | 'evening' | 'night';
 
-export interface User { userId: string; name: string }
+export interface User { userId: string; name: string; email?: string; bio?: string }
 
 export interface Trip {
   tripId: string; name: string; destination: string;
+  ownerUserId?: string;                          // 방장 (여행 취소 권한)
   startDate: string; endDate: string;            // YYYY-MM-DD
   members: User[];
 }

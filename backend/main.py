@@ -5,9 +5,12 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text
 from datetime import datetime
 from backend.database import get_db
+import re
 import uuid
 import logging
 import bcrypt
+from backend.auth import DUMMY_HASH, create_token, current_user, is_trip_owner, trip_member, verify_password
+from backend.services.common import ServiceError, require, row, transaction
 
 # 로깅 설정
 logging.basicConfig(level=logging.INFO)
@@ -44,6 +47,22 @@ class UserCreateRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=100, description="사용자 이름")
     email: str = Field(..., max_length=100, description="이메일")
     password: str = Field(..., min_length=6, description="비밀번호")
+
+    @field_validator("email")
+    @classmethod
+    def validate_email(cls, value: str) -> str:
+        value = value.strip().lower()
+        if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", value):
+            raise ValueError("올바른 이메일 형식이 아닙니다.")
+        return value
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("이름을 입력해주세요.")
+        return value
 
     @field_validator("password")
     @classmethod
@@ -249,89 +268,113 @@ def create_user(
         )
 
 
+class LoginRequest(BaseModel):
+    email: str = Field(..., max_length=100)
+    password: str = Field(..., min_length=1, max_length=200)
+
+
+class ProfileUpdateRequest(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=100)
+    bio: str | None = Field(default=None, max_length=1000)
+    current_password: str | None = Field(default=None, max_length=200)
+    new_password: str | None = Field(default=None, min_length=6)
+
+    @field_validator("new_password")
+    @classmethod
+    def validate_new_password_bytes(cls, value):
+        if value is not None and len(value.encode("utf-8")) > 72:
+            raise ValueError("비밀번호는 UTF-8 기준 72바이트 이하여야 합니다.")
+        return value
+
+
+class DeleteAccountRequest(BaseModel):
+    password: str = Field(..., min_length=1, max_length=200)
+
+
+def _me(db: Session, user_id: str) -> dict:
+    user = row(db, "SELECT user_id,name,email,profile_image_url,bio,is_active,created_at FROM users WHERE user_id=:u", u=user_id)
+    if not user:
+        raise ServiceError(404, "사용자를 찾을 수 없습니다.")
+    user["created_at"] = str(user["created_at"])
+    return user
+
+
+@app.post("/api/auth/login")
+def login(body: LoginRequest, db: Session = Depends(get_db)):
+    """이메일/비밀번호 로그인 → Bearer 토큰 발급"""
+    user = row(db, "SELECT user_id,name,password_hash,is_active FROM users WHERE LOWER(email)=:e",
+               e=body.email.strip().lower())
+    valid = verify_password(body.password, user["password_hash"] if user else DUMMY_HASH)
+    if not user or not valid or not user["is_active"]:
+        raise ServiceError(401, "이메일 또는 비밀번호가 올바르지 않습니다.")
+    return {"status": "success", "token": create_token(user["user_id"]),
+            "user": {"user_id": user["user_id"], "name": user["name"]}}
+
+
+@app.get("/api/users/me")
+def get_me(db: Session = Depends(get_db), uid: str = Depends(current_user)):
+    return {"status": "success", "data": _me(db, uid)}
+
+
+@app.patch("/api/users/me")
+def update_me(body: ProfileUpdateRequest, db: Session = Depends(get_db), uid: str = Depends(current_user)):
+    """이름·소개·비밀번호 변경 (비밀번호 변경은 현재 비밀번호 필요)"""
+    fields = body.model_dump(exclude_unset=True)
+    sets: dict = {}
+    if "name" in fields:
+        name = (fields["name"] or "").strip()
+        if not name:
+            raise ServiceError(400, "이름을 입력해주세요.")
+        sets["name"] = name
+    if "bio" in fields:
+        sets["bio"] = fields["bio"]
+    with transaction(db):
+        if fields.get("new_password"):
+            user = require(db, "users", uid, lock=True)
+            if not verify_password(fields.get("current_password") or "", user["password_hash"]):
+                raise ServiceError(403, "현재 비밀번호가 올바르지 않습니다.")
+            sets["password_hash"] = hash_password(fields["new_password"])
+        if sets:
+            assignments = ", ".join(f"{column}=:{column}" for column in sets)  # 컬럼명은 위 화이트리스트만
+            db.execute(text(f"UPDATE users SET {assignments}, updated_at=NOW() WHERE user_id=:uid"),
+                       {**sets, "uid": uid})
+    return {"status": "success", "data": _me(db, uid)}
+
+
+@app.delete("/api/users/me")
+def delete_me(body: DeleteAccountRequest, db: Session = Depends(get_db), uid: str = Depends(current_user)):
+    """계정 삭제. 방장인 여행은 다른 멤버가 있으면 소유권을 넘기고, 혼자면 함께 삭제한다."""
+    with transaction(db):
+        user = require(db, "users", uid, lock=True)
+        if not verify_password(body.password, user["password_hash"]):
+            raise ServiceError(403, "비밀번호가 올바르지 않습니다.")
+        owned = db.execute(text("SELECT trip_id FROM trips WHERE owner_user_id=:u"), {"u": uid}).scalars().all()
+        for trip_id in owned:
+            successor = row(db, "SELECT user_id FROM trip_members WHERE trip_id=:t AND user_id<>:u ORDER BY joined_at, user_id LIMIT 1",
+                            t=trip_id, u=uid)
+            if successor:
+                db.execute(text("UPDATE trips SET owner_user_id=:s WHERE trip_id=:t"), {"s": successor["user_id"], "t": trip_id})
+            else:
+                db.execute(text("DELETE FROM trips WHERE trip_id=:t"), {"t": trip_id})
+        db.execute(text("DELETE FROM users WHERE user_id=:u"), {"u": uid})
+    return {"status": "success", "message": "계정이 삭제되었습니다."}
+
+
+@app.get("/api/users/lookup")
+def lookup_user(email: str, db: Session = Depends(get_db), _: str = Depends(current_user)):
+    """여행 멤버 초대용: 이메일이 정확히 일치하는 사용자 1명만 반환(전체 목록 노출 없음)"""
+    user = row(db, "SELECT user_id,name FROM users WHERE LOWER(email)=:e AND is_active = TRUE", e=email.strip().lower())
+    if not user:
+        raise ServiceError(404, "해당 이메일로 가입한 사용자를 찾을 수 없어요.")
+    return {"status": "success", "data": user}
+
+
 @app.get("/api/users/{user_id}")
-def get_user(user_id: str, db: Session = Depends(get_db)):
-    """
-    특정 사용자 정보 조회 API
-    """
-    try:
-        query = text("""
-            SELECT
-                user_id,
-                name,
-                email,
-                profile_image_url,
-                bio,
-                is_active,
-                created_at
-            FROM users
-            WHERE user_id = :user_id
-        """)
-
-        result = db.execute(query, {"user_id": user_id}).fetchone()
-
-        if not result:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="사용자를 찾을 수 없습니다."
-            )
-
-        return {
-            "status": "success",
-            "data": {
-                "user_id": result[0],
-                "name": result[1],
-                "email": result[2],
-                "profile_image_url": result[3],
-                "bio": result[4],
-                "is_active": result[5],
-                "created_at": str(result[6])
-            }
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error fetching user: {type(e).__name__}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"사용자 조회 중 오류가 발생했습니다: {type(e).__name__}"
-        )
-
-@app.get("/api/users")
-def list_users(db: Session = Depends(get_db)):
-    """활성 사용자 목록 조회 API"""
-    try:
-        results = db.execute(
-            text("""
-                SELECT
-                    user_id,
-                    name,
-                    email
-                FROM users
-                WHERE is_active = TRUE
-                ORDER BY created_at, user_id
-            """)
-        ).mappings().all()
-
-        return {
-            "status": "success",
-            "data": [
-                {
-                    "user_id": row["user_id"],
-                    "name": row["name"],
-                    "email": row["email"],
-                }
-                for row in results
-            ],
-        }
-
-    except Exception as e:
-        logger.error("Error fetching users: %s", type(e).__name__)
-        raise HTTPException(
-            status_code=500,
-            detail="사용자 목록 조회 중 오류가 발생했습니다.",
-        )
+def get_user(user_id: str, db: Session = Depends(get_db), uid: str = Depends(current_user)):
+    """본인 정보만 조회 가능"""
+    if user_id != uid:
+        raise ServiceError(403, "본인 정보만 조회할 수 있습니다.")
+    return {"status": "success", "data": _me(db, uid)}
 
 
 # ==================== 여행 API ====================
@@ -339,7 +382,8 @@ def list_users(db: Session = Depends(get_db)):
 @app.post("/api/trips", response_model=TripResponse, status_code=201)
 def create_trip(
         trip_data: TripCreateRequest,
-        db: Session = Depends(get_db)
+        db: Session = Depends(get_db),
+        uid: str = Depends(current_user)
 ):
     """
     여행 그룹 생성 API
@@ -353,6 +397,9 @@ def create_trip(
     - **day_end_time**: 하루 종료 시간 (기본값: 20:00:00)
     - **description**: 여행 설명 (선택사항)
     """
+    if trip_data.owner_user_id != uid:
+        raise HTTPException(status_code=403, detail="본인 계정으로만 여행을 만들 수 있습니다.")
+
     try:
         # 1. 입력값 검증
         if not validate_date_format(trip_data.start_date):
@@ -475,7 +522,7 @@ def create_trip(
 
 
 @app.get("/api/trips/{trip_id}")
-def get_trip(trip_id: str, db: Session = Depends(get_db)):
+def get_trip(trip_id: str, db: Session = Depends(get_db), _: str = Depends(trip_member)):
     """
     특정 여행 정보 조회 API
     """
@@ -535,24 +582,28 @@ def get_trip(trip_id: str, db: Session = Depends(get_db)):
 
 
 @app.get("/api/users/{user_id}/trips")
-def get_user_trips(user_id: str, db: Session = Depends(get_db)):
+def get_user_trips(user_id: str, db: Session = Depends(get_db), uid: str = Depends(current_user)):
     """
     특정 사용자의 모든 여행 조회 API
     """
+    if user_id != uid:
+        raise HTTPException(status_code=403, detail="본인 여행만 조회할 수 있습니다.")
+
     try:
         query = text("""
-            SELECT
-                trip_id,
-                owner_user_id,
-                trip_name,
-                region,
-                start_date,
-                end_date,
-                status,
-                created_at
-            FROM trips
-            WHERE owner_user_id = :user_id
-            ORDER BY created_at DESC
+            SELECT DISTINCT
+                t.trip_id,
+                t.owner_user_id,
+                t.trip_name,
+                t.region,
+                t.start_date,
+                t.end_date,
+                t.status,
+                t.created_at
+            FROM trips t
+            JOIN trip_members m ON m.trip_id = t.trip_id
+            WHERE m.user_id = :user_id
+            ORDER BY t.created_at DESC
         """)
 
         results = db.execute(query, {"user_id": user_id}).fetchall()
@@ -589,7 +640,8 @@ def get_user_trips(user_id: str, db: Session = Depends(get_db)):
 def update_trip(
         trip_id: str,
         trip_data: TripCreateRequest,
-        db: Session = Depends(get_db)
+        db: Session = Depends(get_db),
+        uid: str = Depends(current_user)
 ):
     """
     여행 정보 수정 API
@@ -604,6 +656,11 @@ def update_trip(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="여행을 찾을 수 없습니다."
             )
+
+        if not is_trip_owner(db, trip_id, uid):
+            raise HTTPException(status_code=403, detail="방장만 여행 정보를 수정할 수 있습니다.")
+        if trip_data.owner_user_id != uid:
+            raise HTTPException(status_code=400, detail="방장 변경은 지원하지 않습니다.")
 
         # 2. 날짜 형식 검증
         if not validate_date_format(trip_data.start_date):
@@ -680,7 +737,7 @@ def update_trip(
 
 
 @app.delete("/api/trips/{trip_id}")
-def delete_trip(trip_id: str, db: Session = Depends(get_db)):
+def delete_trip(trip_id: str, db: Session = Depends(get_db), uid: str = Depends(current_user)):
     """
     여행 삭제 API
     """
@@ -694,6 +751,9 @@ def delete_trip(trip_id: str, db: Session = Depends(get_db)):
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="여행을 찾을 수 없습니다."
             )
+
+        if not is_trip_owner(db, trip_id, uid):
+            raise HTTPException(status_code=403, detail="방장만 여행을 취소(삭제)할 수 있습니다.")
 
         from backend.services.common import require
         from backend.services.preference_service import recalculate
@@ -732,7 +792,6 @@ def delete_trip(trip_id: str, db: Session = Depends(get_db)):
 
 from fastapi.responses import JSONResponse
 from sqlalchemy.exc import SQLAlchemyError
-from backend.services.common import ServiceError
 from backend.routers import members, shortforms, preferences, itineraries
 app.include_router(members.router)
 app.include_router(shortforms.router)

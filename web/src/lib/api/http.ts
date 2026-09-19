@@ -1,3 +1,5 @@
+import { clearToken, getToken } from '@/lib/auth'
+
 export const API_BASE_URL = (process.env.NEXT_PUBLIC_API_BASE_URL ?? 'http://localhost:8000').replace(/\/+$/, '')
 export const USE_MOCK = process.env.NEXT_PUBLIC_USE_MOCK === 'true'
 
@@ -21,12 +23,18 @@ export async function http<T>(path: string, init?: HttpInit): Promise<T> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
 
+  const token = typeof window === 'undefined' ? '' : getToken()
+
   let res: Response
   try {
     res = await fetch(`${API_BASE_URL}${path}`, {
       ...rest,
       signal: controller.signal,
-      headers: { 'Content-Type': 'application/json', ...rest.headers },
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...rest.headers,
+      },
     })
   } catch (e) {
     if (e instanceof DOMException && e.name === 'AbortError') {
@@ -38,6 +46,8 @@ export async function http<T>(path: string, init?: HttpInit): Promise<T> {
   }
 
   if (!res.ok) {
+    // 토큰이 만료/무효면 로그아웃 처리 (로그인 실패 401은 token이 없어서 영향 없음)
+    if (res.status === 401 && token) clearToken()
     // FastAPI는 {detail}, 그 외 {message}를 흔히 쓴다. 없으면 status만 보여준다.
     let detail = ''
     try {

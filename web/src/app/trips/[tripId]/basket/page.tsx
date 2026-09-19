@@ -3,20 +3,23 @@
 import { useState } from 'react';
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
-import { useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ExternalLink } from 'lucide-react';
-import { getTrip, listTripContents } from '@/lib/api';
+import { deleteContent, getTrip, listTripContents } from '@/lib/api';
+import { useUser } from '@/lib/user-context';
 import { CATEGORY_LABEL, CATEGORY_LIST } from '@/lib/constants';
 import type { Category, Content } from '@/lib/types';
 import { EmptyState, ErrorState, LoadingSteps, UserAvatar } from '@/components/common';
 import { Badge } from '@/components/ui/badge';
-import { buttonVariants } from '@/components/ui/button';
+import { Button, buttonVariants } from '@/components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 
 const ALL = 'all';
 
 export default function BasketPage() {
   const { tripId } = useParams<{ tripId: string }>();
+  const { currentUser } = useUser();
+  const queryClient = useQueryClient();
   const [categoryFilter, setCategoryFilter] = useState<Category | typeof ALL>(ALL);
   const [memberFilter, setMemberFilter] = useState<string>(ALL);
 
@@ -41,6 +44,22 @@ export default function BasketPage() {
       (categoryFilter === ALL || c.category === categoryFilter) &&
       (memberFilter === ALL || c.userId === memberFilter)
   );
+
+  const deleteMutation = useMutation({
+    mutationFn: (contentId: string) => deleteContent(tripId, contentId),
+    // 취향·일정 등 파생 데이터도 함께 갱신되도록 전체를 무효화한다.
+    onSuccess: () => queryClient.invalidateQueries(),
+  });
+
+  const onDelete = (content: Content) => {
+    if (window.confirm(`'${content.place.name || '이 항목'}'을(를) 장바구니에서 삭제할까요?`)) {
+      deleteMutation.mutate(content.contentId);
+    }
+  };
+
+  // 내가 담은 항목이거나 내가 방장이면 수정/삭제할 수 있다.
+  const canEdit = (content: Content) =>
+    content.userId === currentUser.userId || tripQuery.data?.ownerUserId === currentUser.userId;
 
   const isPending = tripQuery.isPending || contentsQuery.isPending;
   const isError = tripQuery.isError || contentsQuery.isError;
@@ -125,11 +144,25 @@ export default function BasketPage() {
       ) : filteredContents.length === 0 ? (
         <EmptyState title="조건에 맞는 장소가 없어요" description="필터를 바꿔서 다시 찾아보세요." />
       ) : (
-        <ul className="flex flex-col gap-3">
-          {filteredContents.map((content) => (
-            <ContentCard key={content.contentId} content={content} saver={memberById.get(content.userId)} />
-          ))}
-        </ul>
+        <>
+          {deleteMutation.isError && (
+            <p role="alert" className="text-sm text-destructive">
+              {deleteMutation.error instanceof Error ? deleteMutation.error.message : '삭제에 실패했어요.'}
+            </p>
+          )}
+          <ul className="flex flex-col gap-3">
+            {filteredContents.map((content) => (
+              <ContentCard
+                key={content.contentId}
+                content={content}
+                saver={memberById.get(content.userId)}
+                editHref={canEdit(content) ? `/trips/${tripId}/review/${content.contentId}` : undefined}
+                onDelete={canEdit(content) ? () => onDelete(content) : undefined}
+                deleting={deleteMutation.isPending && deleteMutation.variables === content.contentId}
+              />
+            ))}
+          </ul>
+        </>
       )}
     </div>
   );
@@ -138,9 +171,15 @@ export default function BasketPage() {
 function ContentCard({
   content,
   saver,
+  editHref,
+  onDelete,
+  deleting,
 }: {
   content: Content;
   saver?: { userId: string; name: string };
+  editHref?: string;
+  onDelete?: () => void;
+  deleting?: boolean;
 }) {
   return (
     <li className="flex flex-col gap-2 rounded-xl border border-border bg-card p-4 shadow-sm">
@@ -177,6 +216,21 @@ function ContentCard({
       >
         원본 보기 <ExternalLink className="size-3.5" />
       </a>
+
+      {(editHref || onDelete) && (
+        <div className="flex gap-2">
+          {editHref && (
+            <Link href={editHref} className={buttonVariants({ variant: 'outline', size: 'sm' })}>
+              수정
+            </Link>
+          )}
+          {onDelete && (
+            <Button type="button" variant="destructive" size="sm" onClick={onDelete} disabled={deleting}>
+              {deleting ? '삭제 중…' : '삭제'}
+            </Button>
+          )}
+        </div>
+      )}
     </li>
   );
 }

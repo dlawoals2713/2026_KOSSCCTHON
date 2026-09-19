@@ -5,6 +5,7 @@ import type {
 } from '@/lib/types'
 
 import {
+  HttpError,
   http,
   USE_MOCK,
 } from './http'
@@ -17,6 +18,7 @@ interface BackendShortform {
   user_id: string
 
   url: string
+  platform?: string | null
   title?: string | null
 
   category?: string | null
@@ -58,6 +60,7 @@ interface CreateShortformResponse {
 
     title?: string | null
     url?: string | null
+    platform?: string | null
   }
 
   preference_profile: unknown
@@ -113,6 +116,16 @@ function normalizeTimeSlot(
   return undefined
 }
 
+function normalizePlatform(
+  value?: string | null,
+): Content['platform'] {
+  return value === 'instagram' ||
+    value === 'youtube' ||
+    value === 'tiktok'
+    ? value
+    : 'other'
+}
+
 function toContent(
   item: BackendShortform,
 ): Content {
@@ -122,7 +135,7 @@ function toContent(
     userId: item.user_id,
 
     url: item.url,
-    platform: 'youtube',
+    platform: normalizePlatform(item.platform),
 
     place: {
       name:
@@ -198,6 +211,7 @@ export async function createContent(
         body: JSON.stringify({
           user_id: input.userId,
           url: input.url,
+          note: input.note,
         }),
       },
     )
@@ -218,6 +232,9 @@ export async function createContent(
 
     title:
       response.analysis.title,
+
+    platform:
+      response.analysis.platform,
 
     category:
       response.analysis.category,
@@ -303,5 +320,22 @@ export async function patchContent(
 
   return toContent(
     response.data,
+  )
+}
+
+export async function deleteContent(
+  tripId: string,
+  contentId: string,
+): Promise<void> {
+  if (USE_MOCK) {
+    throw new HttpError(
+      0,
+      '목(mock) 모드에서는 지원하지 않는 기능이에요.',
+    )
+  }
+
+  await http(
+    `/api/trips/${encodeURIComponent(tripId)}/shortforms/${encodeURIComponent(contentId)}`,
+    { method: 'DELETE' },
   )
 }

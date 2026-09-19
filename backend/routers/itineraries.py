@@ -3,11 +3,12 @@ from datetime import date
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
+from backend.auth import trip_member
 from backend.database import get_db
 from backend.services.common import ServiceError
 from backend.services.itinerary_service import generate_and_save, get_itineraries
 
-router = APIRouter(prefix="/api/trips/{trip_id}", tags=["Itineraries"])
+router = APIRouter(prefix="/api/trips/{trip_id}", tags=["Itineraries"], dependencies=[Depends(trip_member)])
 
 
 class ItineraryRequest(BaseModel):
